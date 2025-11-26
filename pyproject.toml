@@ -1,0 +1,37 @@
+[project]
+name = "anyrouter2openai"
+version = "0.1.0"
+description = "OpenAI API to Anthropic API proxy service - 将 OpenAI 协议转换为 Anthropic 协议的代理服务"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "wood02" }
+]
+keywords = ["openai", "anthropic", "claude", "api", "proxy", "llm"]
+
+dependencies = [
+    "fastapi>=0.122.0",
+    "httpx>=0.28.1",
+    "uvicorn>=0.38.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/wood02/anyrouter2openai"
+Repository = "https://github.com/wood02/anyrouter2openai"
+Issues = "https://github.com/wood02/anyrouter2openai/issues"
+
+[project.scripts]
+anyrouter2openai = "main:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
+ignore = ["E501"]
