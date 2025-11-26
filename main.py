@@ -26,6 +26,8 @@ logger = logging.getLogger(__name__)
 
 # 配置常量
 ANYROUTER_BASE_URL = os.getenv("ANYROUTER_BASE_URL", "https://anyrouter.top")
+# 强制后端使用非流式请求（解决第三方流式响应不稳定问题）
+FORCE_NON_STREAM = os.getenv("FORCE_NON_STREAM", "false").lower() in ("true", "1", "yes")
 DEFAULT_MAX_TOKENS = 10240
 HTTP_TIMEOUT = 120.0
 DEFAULT_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude."
@@ -244,7 +246,6 @@ async def stream_response(
 ) -> AsyncGenerator[str, None]:
     """处理流式响应"""
     client = get_client()
-
     try:
         async with client.stream(
             "POST",
@@ -314,6 +315,65 @@ async def stream_response(
         yield f"data: {json.dumps(error_chunk)}\n\n"
 
 
+async def stream_from_non_stream(
+    anthropic_request: dict[str, Any],
+    headers: dict[str, str],
+    request_id: str,
+    model: str
+) -> AsyncGenerator[str, None]:
+    """
+    调用非流式 API，将响应转换为流式格式输出
+    用于：后端禁用流式，但前端仍需要流式响应的场景
+    """
+    client = get_client()
+    try:
+        resp = await client.post(
+            f"{ANYROUTER_BASE_URL}/v1/messages",
+            headers=headers,
+            json=anthropic_request
+        )
+
+        if resp.status_code != 200:
+            error_chunk = {
+                "error": {
+                    "message": resp.text,
+                    "type": "api_error",
+                    "code": resp.status_code
+                }
+            }
+            logger.error("Upstream error: %d - %s", resp.status_code, resp.text[:200])
+            yield f"data: {json.dumps(error_chunk)}\n\n"
+            return
+
+        anthropic_response = resp.json()
+
+        # 提取文本内容
+        content = "".join(
+            block.get("text", "")
+            for block in anthropic_response.get("content", [])
+            if block.get("type") == "text"
+        )
+
+        # 将完整内容作为一个 chunk 发送
+        if content:
+            chunk = create_stream_chunk(request_id, model, content=content)
+            yield f"data: {json.dumps(chunk)}\n\n"
+
+        # 发送结束标记
+        chunk = create_stream_chunk(request_id, model, finish_reason="stop")
+        yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    except httpx.TimeoutException:
+        logger.error("Request timeout")
+        error_chunk = {"error": {"message": "Request timeout", "type": "timeout_error"}}
+        yield f"data: {json.dumps(error_chunk)}\n\n"
+    except httpx.HTTPError as e:
+        logger.error("HTTP error: %s", str(e))
+        error_chunk = {"error": {"message": str(e), "type": "http_error"}}
+        yield f"data: {json.dumps(error_chunk)}\n\n"
+
+
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(
     request: Request,
@@ -326,14 +386,21 @@ async def chat_completions(
 
     request_id = generate_request_id()
     model = openai_request.get("model", "unknown")
-    is_stream = openai_request.get("stream", False)
+    is_stream = openai_request.get("stream", True)  # OpenAI 默认流式
 
-    logger.info("Request: model=%s, stream=%s, messages=%d",
-                model, is_stream, len(openai_request.get("messages", [])))
+    # 后端请求模式：如果开启强制非流式，则后端始终非流式
+    use_non_stream_backend = FORCE_NON_STREAM or not is_stream
+    if use_non_stream_backend:
+        anthropic_request['stream'] = False
+
+    logger.info("Request: model=%s, frontend_stream=%s, backend_stream=%s, messages=%d",
+                model, is_stream, not use_non_stream_backend, len(openai_request.get("messages", [])))
 
     if is_stream:
+        # 前端需要流式响应
+        handler = stream_from_non_stream if use_non_stream_backend else stream_response
         return StreamingResponse(
-            stream_response(anthropic_request, headers, request_id, model),
+            handler(anthropic_request, headers, request_id, model),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
